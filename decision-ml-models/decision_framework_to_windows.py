@@ -59,11 +59,11 @@ def compute_requirements(ctx, a1, a2, a3, a4):
 
 def get_model_profiles():
     return {
-        "Random Forest":        np.array([0.50, 0.80, 0.50, 0.80]),
-        "XGBoost":              np.array([0.30, 0.80, 0.80, 0.90]),
-        "LightGBM":             np.array([0.30, 0.80, 0.90, 0.90]),
-        "Hidden Markov Model":  np.array([0.80, 0.50, 0.30, 0.50]),
-        "KNeighborsTimeSeries": np.array([0.80, 0.40, 0.50, 0.50]),
+        "Random Forest":        np.array([0.65, 0.85, 0.65, 0.50]),
+        "XGBoost":              np.array([0.50, 0.85, 0.75, 0.80]),
+        "LightGBM":             np.array([0.50, 0.85, 0.90, 0.80]),
+        "Hidden Markov Model":  np.array([0.70, 0.55, 0.30, 0.55]),
+        "KNeighborsTimeSeries": np.array([0.75, 0.35, 0.50, 0.55]),
     }
 
 
