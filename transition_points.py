@@ -2,11 +2,33 @@ import os
 import pandas as pd
 
 
+# Confidence thresholds
+GAP_HIGH = 5.0       # RMSE gap (absolute) for high-confidence transitions
+GAP_MEDIUM = 2.0     # RMSE gap for medium-confidence transitions
+PERSIST_HIGH = 2     # persistence in windows for high/medium confidence
+
+
+def classify_confidence(rmse_gap, persistence_windows):
+    """
+    Classify a transition by confidence.
+
+    high   : large RMSE gap AND the new model survives at least 2 windows
+    medium : moderate RMSE gap OR the new model survives at least 2 windows
+    low    : everything else (likely windowing noise)
+    """
+    gap = abs(rmse_gap)
+
+    if gap >= GAP_HIGH and persistence_windows >= PERSIST_HIGH:
+        return "high"
+    if gap >= GAP_MEDIUM or persistence_windows >= PERSIST_HIGH:
+        return "medium"
+    return "low"
+
+
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # final_model_per_window.csv lives at the project root.
-    input_path = os.path.join(base_dir, "dataset", "final_model_per_window.csv")
+    input_path = os.path.join(base_dir, "final_model_per_window.csv")
     output_path = os.path.join(base_dir, "transition_points.csv")
 
     if not os.path.exists(input_path):
@@ -37,6 +59,7 @@ def main():
         print("Not enough windows to detect transitions.")
         return
 
+    # Detect transitions.
     transitions = []
     previous_model = df["final_model"].iloc[0]
 
@@ -46,11 +69,13 @@ def main():
         if current_model == previous_model:
             continue
 
-        # The new evidence for this transition lives in the 30-day slice
-        # unique to the new window: from window_start[i] to
-        # window_start[i] + 15 days (midpoint).
         new_slice_start = df["window_start"].iloc[idx]
         transition_estimate = new_slice_start + pd.Timedelta(days=15)
+
+        # RMSE gap at the transition window: |best_rmse - second_rmse|
+        gap_at_transition = abs(
+            df["best_rmse"].iloc[idx] - df["second_rmse"].iloc[idx]
+        )
 
         transitions.append({
             "transition_index": idx,
@@ -60,6 +85,7 @@ def main():
             "transition_estimate": transition_estimate,
             "from_model": previous_model,
             "to_model": current_model,
+            "rmse_gap_at_transition": gap_at_transition,
         })
         previous_model = current_model
 
@@ -69,9 +95,7 @@ def main():
 
     df_transitions = pd.DataFrame(transitions)
 
-    # Persistence: number of consecutive windows the new model survives
-    # after the transition. Protects against spurious transitions caused
-    # by the 60-day overlap between consecutive windows.
+    # Persistence: consecutive windows the new model survives after the transition.
     persistence_windows = []
     persistence_days = []
     for _, tr in df_transitions.iterrows():
@@ -91,26 +115,51 @@ def main():
 
     df_transitions["persistence_windows"] = persistence_windows
     df_transitions["persistence_days"] = persistence_days
+
+    # Confidence classification.
+    df_transitions["confidence"] = df_transitions.apply(
+        lambda r: classify_confidence(r["rmse_gap_at_transition"],
+                                       r["persistence_windows"]),
+        axis=1
+    )
+
     df_transitions = df_transitions.drop(columns=["transition_index"])
+
+    # Order columns for readability.
+    cols = [
+        "transition_estimate", "window_start", "window_end", "window_center",
+        "from_model", "to_model",
+        "rmse_gap_at_transition",
+        "persistence_windows", "persistence_days",
+        "confidence",
+    ]
+    df_transitions = df_transitions[cols]
 
     df_transitions.to_csv(output_path, index=False)
 
+    # Summary report.
     print(f"Transitions saved to {output_path}")
     print(f"Number of transitions: {len(df_transitions)}")
     print()
+
+    print("Confidence distribution:")
+    print(df_transitions["confidence"].value_counts().to_string())
+    print()
+
     print("Persistence distribution (in windows):")
     print(df_transitions["persistence_windows"].describe().to_string())
     print()
-    print("Short-lived transitions (persistence <= 1 window):")
-    short = df_transitions[df_transitions["persistence_windows"] <= 1]
-    print(f"  Count: {len(short)} out of {len(df_transitions)}")
-    if len(short) > 0:
-        print(short[["transition_estimate", "from_model", "to_model"]].to_string())
-    print()
-    print("Full transition list:")
-    print(df_transitions[
-        ["transition_estimate", "from_model", "to_model", "persistence_windows"]
-    ].to_string())
+
+    print("Transitions by confidence level:")
+    for level in ["high", "medium", "low"]:
+        sub = df_transitions[df_transitions["confidence"] == level]
+        if len(sub) == 0:
+            continue
+        print(f"\n--- {level.upper()} ({len(sub)}) ---")
+        print(sub[
+            ["transition_estimate", "from_model", "to_model",
+             "rmse_gap_at_transition", "persistence_windows"]
+        ].to_string(index=False))
 
 
 if __name__ == "__main__":
