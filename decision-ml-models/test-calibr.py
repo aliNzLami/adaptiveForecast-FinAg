@@ -91,7 +91,7 @@ for c in real_ctxs:
 all_ctxs = list(synth) + real_ctxs
 
 # --- تست ضرایب دستی ---
-a1, a2, a3, a4 = 0.98, 0.95, 0.90, 0.85
+a1, a2, a3, a4 = 0.98, 0.96, 0.91, 0.85
 
 print(f"Testing coefficients: a1={a1}, a2={a2}, a3={a3}, a4={a4}")
 print(f"Sum = {a1+a2+a3+a4:.4f}")
