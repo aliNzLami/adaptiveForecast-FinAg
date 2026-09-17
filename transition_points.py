@@ -4,7 +4,7 @@ import pandas as pd
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    input_path = os.path.join(base_dir, "final_model_per_window.csv")
+    input_path = os.path.join(base_dir, "dataset", "final_model_per_window.csv")
     output_path = os.path.join(base_dir, "transition_points.csv")
 
     if not os.path.exists(input_path):
