@@ -30,6 +30,10 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
+SEED = 42
+np.random.seed(SEED)
+
+
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
@@ -43,6 +47,7 @@ def tanh(x):
 def tanh_deriv(x):
     return 1 - tanh(x)**2
 
+
 def compute_requirements(ctx, a1, a2, a3, a4):
     V, N, G, rho, E = ctx
     b1, b2, b3, b4 = 1 - a1, 1 - a2, 1 - a3, 1 - a4
@@ -52,10 +57,10 @@ def compute_requirements(ctx, a1, a2, a3, a4):
     r_rep = a4 * G + b4 * E
     return np.array([r_interp, r_robust, r_scal, r_rep])
 
+
 def compute_analytical_sensitivity(ctx, a1, a2, a3, a4):
     V, N, G, rho, E = ctx
     b1, b2, b3, b4 = 1 - a1, 1 - a2, 1 - a3, 1 - a4
-    
     sens = np.zeros((4, 5))
     sens[0, 4] = -a1 * 10 * sigmoid_deriv(10 * (E - 0.5))
     sens[0, 3] = b1
@@ -67,6 +72,7 @@ def compute_analytical_sensitivity(ctx, a1, a2, a3, a4):
     sens[3, 4] = b4
     return sens
 
+
 def compute_dominance_ratio(ctx, a1, a2, a3, a4):
     pairs = [(0, 4, 3), (1, 1, 3), (2, 0, 2), (3, 2, 4)]
     D = np.zeros(4)
@@ -76,6 +82,7 @@ def compute_dominance_ratio(ctx, a1, a2, a3, a4):
         ss = abs(sm[req, sec])
         D[idx] = sp / (sp + ss + 1e-12)
     return D
+
 
 def compute_context_from_df(df, target_col='Corn_Price_USD', E=0.5):
     X = df.drop(columns=[target_col], errors='ignore')
@@ -111,6 +118,7 @@ def compute_context_from_df(df, target_col='Corn_Price_USD', E=0.5):
     
     return np.array([V, N, G, rho, E])
 
+
 def load_dataset():
     paths = [
         "dataset/US_Agriculture_Weather_2010_2024.csv",
@@ -127,12 +135,14 @@ def load_dataset():
     pprint("Dataset not found.")
     return None
 
+
 def load_all_datasets():
     datasets = []
     df = load_dataset()
     if df is not None:
         datasets.append(("US_Crop_Weather", df, "Corn_Price_USD"))
     return datasets
+
 
 def extract_contexts(datasets):
     all_ctxs = []
@@ -148,27 +158,26 @@ def extract_contexts(datasets):
         pprint(f"  Extracted {len(E_levels)} contexts")
     return all_ctxs
 
-def generate_latin_hypercube(n=800, seed=42, low=0.05, high=0.95):
-    np.random.seed(seed)
-    samples = np.zeros((n, 5))
-    for j in range(5):
-        perm = np.random.permutation(n)
-        raw = (perm + np.random.uniform(0, 1, n)) / n
-        samples[:, j] = low + (high - low) * raw
-    return samples
 
-def generate_grid(steps=5, low=0.05, high=0.95):
-    grid = np.linspace(low, high, steps)
-    return np.array(list(product(grid, repeat=5)))
+def generate_perturbed_contexts(real_ctxs, n_per_real=100, sigma=0.05, seed=SEED):
+    rng = np.random.default_rng(seed)
+    synth = []
+    for ctx in real_ctxs:
+        for _ in range(n_per_real):
+            noise = rng.normal(0, sigma, size=5)
+            perturbed = np.clip(ctx + noise, 0, 1)
+            synth.append(perturbed)
+    return np.array(synth)
 
-def check_dominance_quantile(ctxs, a1, a2, a3, a4, thresh=0.70, quantile=0.95):
-    all_D = []
-    if len(ctxs) > 2000:
-        idx = np.random.choice(len(ctxs), 2000, replace=False)
-        sample_ctxs = [ctxs[i] for i in idx]
+
+def check_dominance_quantile(ctxs, a1, a2, a3, a4, thresh=0.70, quantile=0.95, max_sample=2000):
+    if len(ctxs) > max_sample:
+        step = max(1, len(ctxs) // max_sample)
+        sample_ctxs = [ctxs[i] for i in range(0, len(ctxs), step)][:max_sample]
     else:
         sample_ctxs = ctxs
     
+    all_D = []
     for ctx in sample_ctxs:
         D = compute_dominance_ratio(ctx, a1, a2, a3, a4)
         all_D.append(D)
@@ -180,14 +189,20 @@ def check_dominance_quantile(ctxs, a1, a2, a3, a4, thresh=0.70, quantile=0.95):
             return False
     return True
 
+
 def check_bounded(ctxs, a1, a2, a3, a4):
-    sample_size = min(500, len(ctxs))
-    idx = np.random.choice(len(ctxs), sample_size, replace=False)
-    for i in idx:
-        r = compute_requirements(ctxs[i], a1, a2, a3, a4)
+    for ctx in ctxs:
+        r = compute_requirements(ctx, a1, a2, a3, a4)
         if np.any(r < 0) or np.any(r > 1):
             return False
     return True
+
+
+def compute_requirement_spread(ctxs, a1, a2, a3, a4):
+    reqs = np.array([compute_requirements(ctx, a1, a2, a3, a4) for ctx in ctxs])
+    stds = np.std(reqs, axis=0)
+    return float(np.mean(stds))
+
 
 def grid_search(ctxs, step=0.05):
     vals = np.arange(0.50, 0.96, step)
@@ -198,7 +213,6 @@ def grid_search(ctxs, step=0.05):
     pprint(f"Threshold = 0.70 | Sampling {min(2000, len(ctxs))} contexts")
     
     start_time = time.time()
-    
     for a1 in vals:
         for a2 in vals:
             for a3 in vals:
@@ -213,21 +227,24 @@ def grid_search(ctxs, step=0.05):
                     if not check_bounded(ctxs, a1, a2, a3, a4):
                         continue
                     
+                    spread = compute_requirement_spread(ctxs, a1, a2, a3, a4)
                     feasible.append({
                         'a1': round(a1, 2), 'a2': round(a2, 2),
                         'a3': round(a3, 2), 'a4': round(a4, 2),
-                        'sum_a': round(a1 + a2 + a3 + a4, 4)
+                        'sum_a': round(a1 + a2 + a3 + a4, 4),
+                        'spread': round(spread, 6)
                     })
     
-    feasible.sort(key=lambda x: x['sum_a'])
+    feasible.sort(key=lambda x: x['spread'], reverse=True)
     pprint(f"Found {len(feasible)} feasible candidates")
     return feasible
 
-def final_verification(ctxs, candidates):
+
+def final_verification(ctxs, candidates, top_k=20):
     verified = []
-    pprint(f"\nFinal verification on all {len(ctxs)} contexts...")
+    pprint(f"\nFinal verification on all {len(ctxs)} contexts (top {top_k})...")
     
-    for cand in candidates[:20]:
+    for cand in candidates[:top_k]:
         a1, a2, a3, a4 = cand['a1'], cand['a2'], cand['a3'], cand['a4']
         all_D = []
         for ctx in ctxs:
@@ -253,37 +270,36 @@ def final_verification(ctxs, candidates):
         if passes and bounded:
             verified.append(cand)
     
-    verified.sort(key=lambda x: x['sum_a'])
+    verified.sort(key=lambda x: x['spread'], reverse=True)
     return verified
 
-def analyze(feasible):
-    if not feasible:
-        return {'status': 'NO FEASIBLE'}
-    best = feasible[0]
-    best_sum = best['sum_a']
-    near = [c for c in feasible if c['sum_a'] <= best_sum * 1.05]
-    ranges = {}
-    for k in ['a1', 'a2', 'a3', 'a4']:
-        vals = [c[k] for c in near]
-        ranges[k] = {'min': min(vals), 'max': max(vals), 'std': round(np.std(vals), 4)}
-    if len(near) == 1:
-        status = 'STRONG'
-    elif any(ranges[k]['std'] > 0.03 for k in ranges):
-        status = 'WEAK'
-    else:
-        status = 'STABLE'
+
+def analyze(verified):
+    if not verified:
+        return {'status': 'NO VERIFIED'}
+    best = verified[0]
+    spreads = [c['spread'] for c in verified]
     return {
-        'status': status,
-        'best': {'a1': best['a1'], 'a2': best['a2'], 'a3': best['a3'], 'a4': best['a4']},
-        'best_sum': best_sum,
-        'near_count': len(near),
-        'ranges': ranges
+        'status': 'OK',
+        'best': {
+            'a1': best['a1'], 'a2': best['a2'],
+            'a3': best['a3'], 'a4': best['a4']
+        },
+        'best_sum': best['sum_a'],
+        'best_spread': best['spread'],
+        'verified_count': len(verified),
+        'spread_range': {
+            'min': float(min(spreads)),
+            'max': float(max(spreads)),
+            'mean': float(np.mean(spreads))
+        }
     }
+
 
 def main():
     pprint("=" * 80)
     pprint("CALIBRATION - US Crop & Weather Dataset")
-    pprint("Target: Corn_Price_USD | Threshold: 0.70")
+    pprint(f"Target: Corn_Price_USD | Threshold: 0.70 | Seed: {SEED}")
     pprint("=" * 80)
     
     datasets = load_all_datasets()
@@ -294,11 +310,9 @@ def main():
     real_ctxs = extract_contexts(datasets)
     pprint(f"\nExtracted {len(real_ctxs)} real contexts.")
     
-    pprint("\nGenerating synthetic contexts...")
-    lhs = generate_latin_hypercube(800, 42)
-    grid = generate_grid(5)
-    synth_ctxs = np.vstack([lhs, grid])
-    pprint(f"Generated {len(synth_ctxs)} synthetic contexts")
+    pprint("\nGenerating perturbed contexts around real ones...")
+    synth_ctxs = generate_perturbed_contexts(real_ctxs, n_per_real=100, sigma=0.05)
+    pprint(f"Generated {len(synth_ctxs)} synthetic contexts (sigma=0.05)")
     
     all_ctxs = list(synth_ctxs) + list(real_ctxs)
     pprint(f"Total contexts: {len(all_ctxs)}")
@@ -309,8 +323,9 @@ def main():
         pprint("No feasible coefficients found.")
         sys.exit(1)
     
-    verified = final_verification(all_ctxs, feasible)
+    verified = final_verification(all_ctxs, feasible, top_k=20)
     if not verified:
+        pprint("No verified candidates. Using top feasible.")
         verified = feasible[:1]
     
     result = analyze(verified)
@@ -324,24 +339,24 @@ def main():
     pprint(f"a3 = {best['a3']:.2f}  (Scalability)")
     pprint(f"a4 = {best['a4']:.2f}  (Rep. Capacity)")
     pprint(f"Sum = {result['best_sum']:.2f}")
-    pprint(f"Identifiability: {result['status']}")
-    
-    if result['status'] == 'WEAK':
-        pprint("\nNear-optimal ranges:")
-        for k, v in result['ranges'].items():
-            pprint(f"  {k}: [{v['min']:.2f}, {v['max']:.2f}] (std={v['std']:.3f})")
+    pprint(f"Spread (objective) = {result['best_spread']:.6f}")
+    pprint(f"Verified candidates: {result['verified_count']}")
+    pprint(f"Spread range: [{result['spread_range']['min']:.6f}, {result['spread_range']['max']:.6f}]")
     
     os.makedirs('output', exist_ok=True)
     report = {
         'dataset': 'US_Agriculture_Weather_2010_2024.csv',
         'target': 'Corn_Price_USD',
+        'seed': SEED,
         'real_contexts': len(real_ctxs),
         'synthetic_contexts': len(synth_ctxs),
         'total_contexts': len(all_ctxs),
+        'objective': 'maximize_requirement_spread',
         'selected': best,
-        'identifiability': result['status'],
-        'near_optimal_count': result['near_count'],
-        'coefficient_ranges': result['ranges']
+        'best_sum': result['best_sum'],
+        'best_spread': result['best_spread'],
+        'verified_count': result['verified_count'],
+        'spread_range': result['spread_range']
     }
     
     with open('output/best_coefficients_us_crop.json', 'w') as f:
@@ -349,6 +364,7 @@ def main():
     
     pprint("\nReport saved to output/best_coefficients_us_crop.json")
     pprint("=" * 80)
+
 
 if __name__ == "__main__":
     main()
