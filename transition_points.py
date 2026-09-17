@@ -4,6 +4,8 @@ import pandas as pd
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # final_model_per_window.csv lives at the project root.
     input_path = os.path.join(base_dir, "dataset", "final_model_per_window.csv")
     output_path = os.path.join(base_dir, "transition_points.csv")
 
@@ -14,7 +16,14 @@ def main():
     df = pd.read_csv(input_path)
     df["window_start"] = pd.to_datetime(df["window_start"])
     df["window_end"] = pd.to_datetime(df["window_end"])
-    df["window_center"] = pd.to_datetime(df["window_center"])
+
+    # window_center is not propagated through model_ranking.py and
+    # final_model_per_window.py. Compute it if missing.
+    if "window_center" in df.columns:
+        df["window_center"] = pd.to_datetime(df["window_center"])
+    else:
+        df["window_center"] = df["window_start"] + (df["window_end"] - df["window_start"]) / 2
+
     df = df.sort_values("window_start").reset_index(drop=True)
 
     # Filter out Unknown models. They are not valid regime labels.
@@ -38,9 +47,8 @@ def main():
             continue
 
         # The new evidence for this transition lives in the 30-day slice
-        # that is unique to the new window: from window_start[i] to
-        # window_start[i] + step_days. Midpoint of that slice is our best
-        # single-date estimate.
+        # unique to the new window: from window_start[i] to
+        # window_start[i] + 15 days (midpoint).
         new_slice_start = df["window_start"].iloc[idx]
         transition_estimate = new_slice_start + pd.Timedelta(days=15)
 
@@ -62,8 +70,8 @@ def main():
     df_transitions = pd.DataFrame(transitions)
 
     # Persistence: number of consecutive windows the new model survives
-    # after the transition. This is our main defense against spurious
-    # transitions caused by the 60-day overlap between windows.
+    # after the transition. Protects against spurious transitions caused
+    # by the 60-day overlap between consecutive windows.
     persistence_windows = []
     persistence_days = []
     for _, tr in df_transitions.iterrows():
