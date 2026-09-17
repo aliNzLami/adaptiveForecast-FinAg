@@ -62,7 +62,7 @@ def get_model_profiles():
         "Random Forest":        np.array([0.65, 0.85, 0.65, 0.50]),
         "XGBoost":              np.array([0.50, 0.85, 0.75, 0.80]),
         "LightGBM":             np.array([0.50, 0.85, 0.90, 0.80]),
-        "Hidden Markov Model":  np.array([0.70, 0.55, 0.30, 0.55]),
+        "Hidden Markov Model":  np.array([0.80, 0.55, 0.30, 0.55]),
         "KNeighborsTimeSeries": np.array([0.75, 0.35, 0.50, 0.55]),
     }
 
