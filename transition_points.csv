@@ -1,0 +1,43 @@
+window_start,window_end,window_center,transition_estimate,from_model,to_model,persistence_windows,persistence_days
+2010-05-13,2010-09-20,2010-07-17 00:00:00,2010-05-28,Random Forest,XGBoost,1,43
+2010-06-25,2010-11-01,2010-08-28 12:00:00,2010-07-10,XGBoost,Random Forest,1,45
+2010-08-09,2010-12-14,2010-10-11 12:00:00,2010-08-24,Random Forest,XGBoost,1,128
+2010-12-15,2011-04-25,2011-02-18 12:00:00,2010-12-30,XGBoost,Random Forest,5,436
+2012-02-24,2012-07-02,2012-04-28 12:00:00,2012-03-10,Random Forest,XGBoost,1,45
+2012-04-09,2012-08-14,2012-06-11 12:00:00,2012-04-24,XGBoost,Random Forest,2,128
+2012-08-15,2012-12-24,2012-10-19 12:00:00,2012-08-30,Random Forest,KNeighborsTimeSeries,1,133
+2012-12-26,2013-05-06,2013-03-01 12:00:00,2013-01-10,KNeighborsTimeSeries,Random Forest,3,261
+2013-09-13,2014-01-22,2013-11-17 12:00:00,2013-09-28,Random Forest,Hidden Markov Model,2,175
+2014-03-07,2014-07-15,2014-05-11 00:00:00,2014-03-22,Hidden Markov Model,Random Forest,4,173
+2014-08-27,2015-01-05,2014-10-31 12:00:00,2014-09-11,Random Forest,KNeighborsTimeSeries,1,43
+2014-10-09,2015-02-18,2014-12-14 00:00:00,2014-10-24,KNeighborsTimeSeries,Hidden Markov Model,1,42
+2014-11-20,2015-04-01,2015-01-25 00:00:00,2014-12-05,Hidden Markov Model,Random Forest,5,307
+2015-09-23,2016-02-01,2015-11-27 12:00:00,2015-10-08,Random Forest,KNeighborsTimeSeries,1,42
+2015-11-04,2016-03-15,2016-01-09 00:00:00,2015-11-19,KNeighborsTimeSeries,Random Forest,1,43
+2015-12-17,2016-04-27,2016-02-21 00:00:00,2016-01-01,Random Forest,KNeighborsTimeSeries,1,176
+2016-06-10,2016-10-18,2016-08-14 00:00:00,2016-06-25,KNeighborsTimeSeries,XGBoost,1,88
+2016-09-06,2017-01-17,2016-11-11 12:00:00,2016-09-21,XGBoost,KNeighborsTimeSeries,1,43
+2016-10-19,2017-03-01,2016-12-24 12:00:00,2016-11-03,KNeighborsTimeSeries,Hidden Markov Model,2,134
+2017-03-02,2017-07-10,2017-05-06 00:00:00,2017-03-17,Hidden Markov Model,KNeighborsTimeSeries,1,42
+2017-04-13,2017-08-21,2017-06-17 00:00:00,2017-04-28,KNeighborsTimeSeries,Random Forest,3,174
+2017-10-04,2018-02-12,2017-12-08 12:00:00,2017-10-19,Random Forest,Hidden Markov Model,1,42
+2017-11-15,2018-03-27,2018-01-20 00:00:00,2017-11-30,Hidden Markov Model,Random Forest,1,44
+2017-12-29,2018-05-09,2018-03-04 12:00:00,2018-01-13,Random Forest,KNeighborsTimeSeries,1,132
+2018-05-10,2018-09-17,2018-07-14 00:00:00,2018-05-25,KNeighborsTimeSeries,Random Forest,1,43
+2018-06-22,2018-10-29,2018-08-25 12:00:00,2018-07-07,Random Forest,KNeighborsTimeSeries,2,88
+2018-09-18,2019-01-30,2018-11-24 00:00:00,2018-10-03,KNeighborsTimeSeries,Hidden Markov Model,1,135
+2019-01-31,2019-06-10,2019-04-06 00:00:00,2019-02-15,Hidden Markov Model,Random Forest,1,43
+2019-03-15,2019-07-23,2019-05-19 00:00:00,2019-03-30,Random Forest,Hidden Markov Model,1,45
+2019-04-29,2019-09-04,2019-07-02 00:00:00,2019-05-14,Hidden Markov Model,Random Forest,3,129
+2019-09-05,2020-01-13,2019-11-09 00:00:00,2019-09-20,Random Forest,Hidden Markov Model,1,42
+2019-10-17,2020-02-26,2019-12-22 00:00:00,2019-11-01,Hidden Markov Model,Random Forest,1,43
+2019-11-29,2020-04-08,2020-02-02 12:00:00,2019-12-14,Random Forest,KNeighborsTimeSeries,1,90
+2020-02-27,2020-07-06,2020-05-02 00:00:00,2020-03-13,KNeighborsTimeSeries,Random Forest,1,42
+2020-04-09,2020-08-17,2020-06-13 00:00:00,2020-04-24,Random Forest,Hidden Markov Model,1,43
+2020-05-22,2020-09-29,2020-07-26 00:00:00,2020-06-06,Hidden Markov Model,Random Forest,2,88
+2020-08-18,2020-12-23,2020-10-20 12:00:00,2020-09-02,Random Forest,KNeighborsTimeSeries,1,43
+2020-09-30,2021-02-08,2020-12-04 12:00:00,2020-10-15,KNeighborsTimeSeries,Random Forest,4,261
+2021-06-18,2021-10-25,2021-08-21 12:00:00,2021-07-03,Random Forest,XGBoost,1,45
+2021-08-02,2021-12-07,2021-10-04 12:00:00,2021-08-17,XGBoost,Random Forest,3,389
+2022-08-26,2023-01-04,2022-10-30 12:00:00,2022-09-10,Random Forest,Hidden Markov Model,1,132
+2023-01-05,2023-05-15,2023-03-11 00:00:00,2023-01-20,Hidden Markov Model,Random Forest,2,174
