@@ -3,25 +3,32 @@ import pandas as pd
 
 
 # Confidence thresholds
-GAP_HIGH = 5.0       # RMSE gap (absolute) for high-confidence transitions
-GAP_MEDIUM = 2.0     # RMSE gap for medium-confidence transitions
-PERSIST_HIGH = 2     # persistence in windows for high/medium confidence
+GAP_HIGH = 5.0       # RMSE gap for high / spike
+GAP_MEDIUM = 2.0     # RMSE gap for medium / weak
+PERSIST_HIGH = 2     # persistence (in windows) required for stable transitions
 
 
 def classify_confidence(rmse_gap, persistence_windows):
     """
     Classify a transition by confidence.
 
-    high   : large RMSE gap AND the new model survives at least 2 windows
-    medium : moderate RMSE gap OR the new model survives at least 2 windows
-    low    : everything else (likely windowing noise)
+    high   : large RMSE gap AND the new model persists at least 2 windows
+    spike  : large RMSE gap but the new model lasts only 1 window (short shock)
+    medium : moderate or small RMSE gap, but the new model persists
+    weak   : moderate RMSE gap and the new model lasts only 1 window
+    low    : small RMSE gap and the new model lasts only 1 window (windowing noise)
     """
     gap = abs(rmse_gap)
+    persistent = persistence_windows >= PERSIST_HIGH
 
-    if gap >= GAP_HIGH and persistence_windows >= PERSIST_HIGH:
+    if gap >= GAP_HIGH and persistent:
         return "high"
-    if gap >= GAP_MEDIUM or persistence_windows >= PERSIST_HIGH:
+    if gap >= GAP_HIGH and not persistent:
+        return "spike"
+    if persistent:
         return "medium"
+    if gap >= GAP_MEDIUM:
+        return "weak"
     return "low"
 
 
@@ -116,7 +123,7 @@ def main():
     df_transitions["persistence_windows"] = persistence_windows
     df_transitions["persistence_days"] = persistence_days
 
-    # Confidence classification.
+    # Confidence classification (5 levels).
     df_transitions["confidence"] = df_transitions.apply(
         lambda r: classify_confidence(r["rmse_gap_at_transition"],
                                        r["persistence_windows"]),
@@ -135,6 +142,13 @@ def main():
     ]
     df_transitions = df_transitions[cols]
 
+    # Sort by confidence rank then by date.
+    order = {"high": 0, "medium": 1, "spike": 2, "weak": 3, "low": 4}
+    df_transitions["_rank"] = df_transitions["confidence"].map(order)
+    df_transitions = df_transitions.sort_values(
+        ["_rank", "transition_estimate"]
+    ).drop(columns=["_rank"]).reset_index(drop=True)
+
     df_transitions.to_csv(output_path, index=False)
 
     # Summary report.
@@ -143,7 +157,11 @@ def main():
     print()
 
     print("Confidence distribution:")
-    print(df_transitions["confidence"].value_counts().to_string())
+    counts = df_transitions["confidence"].value_counts()
+    for level in ["high", "medium", "spike", "weak", "low"]:
+        n = int(counts.get(level, 0))
+        pct = n / len(df_transitions) * 100 if len(df_transitions) else 0
+        print(f"  {level:7s}: {n:3d} ({pct:.1f}%)")
     print()
 
     print("Persistence distribution (in windows):")
@@ -151,7 +169,7 @@ def main():
     print()
 
     print("Transitions by confidence level:")
-    for level in ["high", "medium", "low"]:
+    for level in ["high", "medium", "spike", "weak", "low"]:
         sub = df_transitions[df_transitions["confidence"] == level]
         if len(sub) == 0:
             continue
