@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+Calibration module for the training-free model selection framework.
+
+Goal: find coefficients (a1, a2, a3, a4) that satisfy two constraints
+on the requirement vector, for the US crop & weather dataset.
+
+Constraints (from the framework paper):
+  C1. Dominance: for at least 95% of contexts, the dominance ratio for each
+      requirement exceeds 0.70.
+  C2. Boundedness: the requirement vector stays in [0, 1] for every context.
+
+Objective: among feasible candidates, minimize the sum of coefficients.
+Rationale: the most permissive feasible calibration is preferred. Large
+coefficients over-constrain the requirement vector; small coefficients
+represent a lighter touch on the primary drivers.
+"""
+
 import os
 import sys
 import json
@@ -31,8 +48,16 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 SEED = 42
-np.random.seed(SEED)
+DOMINANCE_THRESHOLD = 0.70
+DOMINANCE_QUANTILE = 0.05   # 5th percentile must exceed threshold
+                            # <=> 95% of contexts satisfy dominance
+PERTURB_SIGMA = 0.05
+PERTURB_PER_REAL = 100
 
+
+# ---------------------------------------------------------------------------
+# Core math
+# ---------------------------------------------------------------------------
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
@@ -45,35 +70,38 @@ def tanh(x):
     return np.tanh(x)
 
 def tanh_deriv(x):
-    return 1 - tanh(x)**2
+    return 1 - tanh(x) ** 2
 
 
 def compute_requirements(ctx, a1, a2, a3, a4):
+    """Requirement vector from context vector and coefficients."""
     V, N, G, rho, E = ctx
     b1, b2, b3, b4 = 1 - a1, 1 - a2, 1 - a3, 1 - a4
     r_interp = a1 * (1 - sigmoid(10 * (E - 0.5))) + b1 * rho
     r_robust = a2 * sigmoid(12 * (N - 0.35)) + b2 * tanh(2 * rho)
-    r_scal = a3 * tanh(3 * V) + b3 * G
-    r_rep = a4 * G + b4 * E
+    r_scal   = a3 * tanh(3 * V) + b3 * G
+    r_rep    = a4 * G + b4 * E
     return np.array([r_interp, r_robust, r_scal, r_rep])
 
 
 def compute_analytical_sensitivity(ctx, a1, a2, a3, a4):
+    """Partial derivatives of each requirement w.r.t. its drivers."""
     V, N, G, rho, E = ctx
     b1, b2, b3, b4 = 1 - a1, 1 - a2, 1 - a3, 1 - a4
     sens = np.zeros((4, 5))
-    sens[0, 4] = -a1 * 10 * sigmoid_deriv(10 * (E - 0.5))
-    sens[0, 3] = b1
-    sens[1, 1] = a2 * 12 * sigmoid_deriv(12 * (N - 0.35))
-    sens[1, 3] = b2 * 2 * tanh_deriv(2 * rho)
-    sens[2, 0] = a3 * 3 * tanh_deriv(3 * V)
-    sens[2, 2] = b3
-    sens[3, 2] = a4
-    sens[3, 4] = b4
+    sens[0, 4] = -a1 * 10 * sigmoid_deriv(10 * (E - 0.5))   # d r_interp / d E
+    sens[0, 3] = b1                                          # d r_interp / d rho
+    sens[1, 1] = a2 * 12 * sigmoid_deriv(12 * (N - 0.35))   # d r_robust / d N
+    sens[1, 3] = b2 * 2 * tanh_deriv(2 * rho)               # d r_robust / d rho
+    sens[2, 0] = a3 * 3 * tanh_deriv(3 * V)                 # d r_scal / d V
+    sens[2, 2] = b3                                          # d r_scal / d G
+    sens[3, 2] = a4                                          # d r_rep / d G
+    sens[3, 4] = b4                                          # d r_rep / d E
     return sens
 
 
 def compute_dominance_ratio(ctx, a1, a2, a3, a4):
+    """Dominance ratio for each requirement: primary share / (primary + secondary)."""
     pairs = [(0, 4, 3), (1, 1, 3), (2, 0, 2), (3, 2, 4)]
     D = np.zeros(4)
     sm = compute_analytical_sensitivity(ctx, a1, a2, a3, a4)
@@ -84,12 +112,16 @@ def compute_dominance_ratio(ctx, a1, a2, a3, a4):
     return D
 
 
+# ---------------------------------------------------------------------------
+# Context extraction from dataset
+# ---------------------------------------------------------------------------
+
 def compute_context_from_df(df, target_col='Corn_Price_USD', E=0.5):
     X = df.drop(columns=[target_col], errors='ignore')
     n, p = X.shape
     V = np.clip(np.log10(max(n, 1)) / 6, 0, 1)
     rho = np.clip(p / max(n, 1), 0, 1)
-    
+
     missing = X.isnull().sum().sum() / (n * p) if n * p > 0 else 0
     outlier_ratio = 0
     num_cols = X.select_dtypes(include=[np.number]).columns
@@ -100,7 +132,7 @@ def compute_context_from_df(df, target_col='Corn_Price_USD', E=0.5):
             outlier_ratio += outliers / max(n, 1)
     outlier_ratio = outlier_ratio / max(1, len(num_cols))
     N = np.clip(0.5 * missing + 0.5 * outlier_ratio, 0, 1)
-    
+
     date_cols = X.select_dtypes(include=['datetime64']).columns
     if len(date_cols) > 0:
         try:
@@ -111,11 +143,11 @@ def compute_context_from_df(df, target_col='Corn_Price_USD', E=0.5):
                 G = np.clip(86400 / max(median_delta, 86400), 0, 1)
             else:
                 G = 0.5
-        except:
+        except Exception:
             G = 0.5
     else:
         G = np.clip(np.log10(max(n, 1)) / 6, 0, 1)
-    
+
     return np.array([V, N, G, rho, E])
 
 
@@ -159,7 +191,9 @@ def extract_contexts(datasets):
     return all_ctxs
 
 
-def generate_perturbed_contexts(real_ctxs, n_per_real=100, sigma=0.05, seed=SEED):
+def generate_perturbed_contexts(real_ctxs, n_per_real=PERTURB_PER_REAL,
+                                 sigma=PERTURB_SIGMA, seed=SEED):
+    """Synthetic contexts by adding Gaussian noise around real contexts."""
     rng = np.random.default_rng(seed)
     synth = []
     for ctx in real_ctxs:
@@ -170,21 +204,26 @@ def generate_perturbed_contexts(real_ctxs, n_per_real=100, sigma=0.05, seed=SEED
     return np.array(synth)
 
 
-def check_dominance_quantile(ctxs, a1, a2, a3, a4, thresh=0.70, quantile=0.95, max_sample=2000):
+# ---------------------------------------------------------------------------
+# Constraint checks
+# ---------------------------------------------------------------------------
+
+def check_dominance_quantile(ctxs, a1, a2, a3, a4,
+                              thresh=DOMINANCE_THRESHOLD,
+                              quantile=DOMINANCE_QUANTILE,
+                              max_sample=2000):
+    """Return True if the given quantile of D exceeds threshold for all 4 reqs."""
     if len(ctxs) > max_sample:
         step = max(1, len(ctxs) // max_sample)
         sample_ctxs = [ctxs[i] for i in range(0, len(ctxs), step)][:max_sample]
     else:
         sample_ctxs = ctxs
-    
-    all_D = []
-    for ctx in sample_ctxs:
-        D = compute_dominance_ratio(ctx, a1, a2, a3, a4)
-        all_D.append(D)
-    all_D = np.array(all_D)
+
+    all_D = np.array([compute_dominance_ratio(ctx, a1, a2, a3, a4)
+                      for ctx in sample_ctxs])
+
     for req_idx in range(4):
-        D_req = all_D[:, req_idx]
-        q = np.quantile(D_req, quantile)
+        q = float(np.quantile(all_D[:, req_idx], quantile))
         if q <= thresh:
             return False
     return True
@@ -198,20 +237,38 @@ def check_bounded(ctxs, a1, a2, a3, a4):
     return True
 
 
-def compute_requirement_spread(ctxs, a1, a2, a3, a4):
-    reqs = np.array([compute_requirements(ctx, a1, a2, a3, a4) for ctx in ctxs])
-    stds = np.std(reqs, axis=0)
-    return float(np.mean(stds))
+def diagnose_failure(ctxs, a1, a2, a3, a4):
+    """Report dominance stats to help debug infeasibility."""
+    all_D = np.array([compute_dominance_ratio(ctx, a1, a2, a3, a4)
+                      for ctx in ctxs])
+    names = ['interp', 'robust', 'scal', 'rep']
+    out = {}
+    for i, name in enumerate(names):
+        D = all_D[:, i]
+        out[name] = {
+            'min': float(np.min(D)),
+            'q05': float(np.quantile(D, 0.05)),
+            'median': float(np.median(D)),
+            'max': float(np.max(D))
+        }
+    return out
 
+
+# ---------------------------------------------------------------------------
+# Grid search
+# ---------------------------------------------------------------------------
 
 def grid_search(ctxs, step=0.05):
     vals = np.arange(0.50, 0.96, step)
     feasible = []
     total = len(vals) ** 4
     count = 0
+
     pprint(f"\nGrid search over {total} combinations...")
-    pprint(f"Threshold = 0.70 | Sampling {min(2000, len(ctxs))} contexts")
-    
+    pprint(f"Dominance threshold = {DOMINANCE_THRESHOLD} "
+           f"at quantile {DOMINANCE_QUANTILE}")
+    pprint(f"Sampling up to 2000 contexts")
+
     start_time = time.time()
     for a1 in vals:
         for a2 in vals:
@@ -221,56 +278,49 @@ def grid_search(ctxs, step=0.05):
                     if count % 1000 == 0:
                         elapsed = time.time() - start_time
                         pprint(f"  {count}/{total} | {elapsed:.1f}s")
-                    
+
                     if not check_dominance_quantile(ctxs, a1, a2, a3, a4):
                         continue
                     if not check_bounded(ctxs, a1, a2, a3, a4):
                         continue
-                    
-                    spread = compute_requirement_spread(ctxs, a1, a2, a3, a4)
+
                     feasible.append({
-                        'a1': round(a1, 2), 'a2': round(a2, 2),
-                        'a3': round(a3, 2), 'a4': round(a4, 2),
-                        'sum_a': round(a1 + a2 + a3 + a4, 4),
-                        'spread': round(spread, 6)
+                        'a1': round(float(a1), 2),
+                        'a2': round(float(a2), 2),
+                        'a3': round(float(a3), 2),
+                        'a4': round(float(a4), 2),
+                        'sum_a': round(float(a1 + a2 + a3 + a4), 4),
                     })
-    
-    feasible.sort(key=lambda x: x['spread'], reverse=True)
+
+    # Objective: minimize sum_a among feasible candidates.
+    feasible.sort(key=lambda x: x['sum_a'])
     pprint(f"Found {len(feasible)} feasible candidates")
     return feasible
 
 
 def final_verification(ctxs, candidates, top_k=20):
+    """Re-check top candidates on the full context set (no sampling)."""
     verified = []
     pprint(f"\nFinal verification on all {len(ctxs)} contexts (top {top_k})...")
-    
+
     for cand in candidates[:top_k]:
         a1, a2, a3, a4 = cand['a1'], cand['a2'], cand['a3'], cand['a4']
-        all_D = []
-        for ctx in ctxs:
-            D = compute_dominance_ratio(ctx, a1, a2, a3, a4)
-            all_D.append(D)
-        all_D = np.array(all_D)
-        
+        all_D = np.array([compute_dominance_ratio(ctx, a1, a2, a3, a4)
+                          for ctx in ctxs])
+
         passes = True
         for req_idx in range(4):
-            D_req = all_D[:, req_idx]
-            q = np.quantile(D_req, 0.95)
-            if q <= 0.70:
+            q = float(np.quantile(all_D[:, req_idx], DOMINANCE_QUANTILE))
+            if q <= DOMINANCE_THRESHOLD:
                 passes = False
                 break
-        
-        bounded = True
-        for ctx in ctxs:
-            r = compute_requirements(ctx, a1, a2, a3, a4)
-            if np.any(r < 0) or np.any(r > 1):
-                bounded = False
-                break
-        
+
+        bounded = check_bounded(ctxs, a1, a2, a3, a4)
+
         if passes and bounded:
             verified.append(cand)
-    
-    verified.sort(key=lambda x: x['spread'], reverse=True)
+
+    verified.sort(key=lambda x: x['sum_a'])
     return verified
 
 
@@ -278,7 +328,7 @@ def analyze(verified):
     if not verified:
         return {'status': 'NO VERIFIED'}
     best = verified[0]
-    spreads = [c['spread'] for c in verified]
+    sums = [c['sum_a'] for c in verified]
     return {
         'status': 'OK',
         'best': {
@@ -286,51 +336,68 @@ def analyze(verified):
             'a3': best['a3'], 'a4': best['a4']
         },
         'best_sum': best['sum_a'],
-        'best_spread': best['spread'],
         'verified_count': len(verified),
-        'spread_range': {
-            'min': float(min(spreads)),
-            'max': float(max(spreads)),
-            'mean': float(np.mean(spreads))
+        'sum_range': {
+            'min': float(min(sums)),
+            'max': float(max(sums)),
+            'mean': float(np.mean(sums))
         }
     }
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     pprint("=" * 80)
     pprint("CALIBRATION - US Crop & Weather Dataset")
-    pprint(f"Target: Corn_Price_USD | Threshold: 0.70 | Seed: {SEED}")
+    pprint(f"Objective: minimize sum of coefficients subject to feasibility")
+    pprint(f"Seed: {SEED} | Sigma: {PERTURB_SIGMA} | Per real ctx: {PERTURB_PER_REAL}")
     pprint("=" * 80)
-    
+
     datasets = load_all_datasets()
     if not datasets:
         pprint("Dataset not found. Exiting.")
         sys.exit(1)
-    
+
     real_ctxs = extract_contexts(datasets)
     pprint(f"\nExtracted {len(real_ctxs)} real contexts.")
-    
+
     pprint("\nGenerating perturbed contexts around real ones...")
-    synth_ctxs = generate_perturbed_contexts(real_ctxs, n_per_real=100, sigma=0.05)
-    pprint(f"Generated {len(synth_ctxs)} synthetic contexts (sigma=0.05)")
-    
+    synth_ctxs = generate_perturbed_contexts(real_ctxs)
+    pprint(f"Generated {len(synth_ctxs)} synthetic contexts "
+           f"(sigma={PERTURB_SIGMA}, per_real={PERTURB_PER_REAL})")
+
     all_ctxs = list(synth_ctxs) + list(real_ctxs)
     pprint(f"Total contexts: {len(all_ctxs)}")
-    
+
     feasible = grid_search(all_ctxs, step=0.05)
-    
+
     if not feasible:
+        pprint("\n" + "!" * 80)
         pprint("No feasible coefficients found.")
+        pprint("!" * 80)
+        pprint("\nDiagnostic on a mid-range candidate (a1=a2=a3=a4=0.75):")
+        diag = diagnose_failure(all_ctxs, 0.75, 0.75, 0.75, 0.75)
+        for name, st in diag.items():
+            pprint(f"  {name:8s}: min={st['min']:.4f} "
+                   f"q05={st['q05']:.4f} "
+                   f"median={st['median']:.4f} "
+                   f"max={st['max']:.4f}")
+        pprint("\nThreshold = 0.70, required at q05.")
+        pprint("If q05 is far below 0.70 for some requirement, the calibration "
+               "constraints are not satisfiable with the current equations.")
         sys.exit(1)
-    
+
     verified = final_verification(all_ctxs, feasible, top_k=20)
     if not verified:
         pprint("No verified candidates. Using top feasible.")
         verified = feasible[:1]
-    
+
     result = analyze(verified)
     best = result['best']
-    
+
     pprint("\n" + "=" * 80)
     pprint("FINAL CALIBRATION RESULT")
     pprint("=" * 80)
@@ -339,29 +406,33 @@ def main():
     pprint(f"a3 = {best['a3']:.2f}  (Scalability)")
     pprint(f"a4 = {best['a4']:.2f}  (Rep. Capacity)")
     pprint(f"Sum = {result['best_sum']:.2f}")
-    pprint(f"Spread (objective) = {result['best_spread']:.6f}")
     pprint(f"Verified candidates: {result['verified_count']}")
-    pprint(f"Spread range: [{result['spread_range']['min']:.6f}, {result['spread_range']['max']:.6f}]")
-    
+    pprint(f"Sum range across verified: "
+           f"[{result['sum_range']['min']:.2f}, "
+           f"{result['sum_range']['max']:.2f}]")
+
     os.makedirs('output', exist_ok=True)
     report = {
         'dataset': 'US_Agriculture_Weather_2010_2024.csv',
         'target': 'Corn_Price_USD',
         'seed': SEED,
+        'dominance_threshold': DOMINANCE_THRESHOLD,
+        'dominance_quantile': DOMINANCE_QUANTILE,
+        'perturb_sigma': PERTURB_SIGMA,
+        'perturb_per_real': PERTURB_PER_REAL,
         'real_contexts': len(real_ctxs),
         'synthetic_contexts': len(synth_ctxs),
         'total_contexts': len(all_ctxs),
-        'objective': 'maximize_requirement_spread',
+        'objective': 'minimize_sum_a_among_feasible',
         'selected': best,
         'best_sum': result['best_sum'],
-        'best_spread': result['best_spread'],
         'verified_count': result['verified_count'],
-        'spread_range': result['spread_range']
+        'sum_range': result['sum_range']
     }
-    
+
     with open('output/best_coefficients_us_crop.json', 'w') as f:
         json.dump(report, f, indent=4)
-    
+
     pprint("\nReport saved to output/best_coefficients_us_crop.json")
     pprint("=" * 80)
 
