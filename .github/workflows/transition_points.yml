@@ -32,11 +32,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f "dataset/transition_points.csv" ]; then
-            git add dataset/transition_points.csv
+          if [ -f "transition_points.csv" ]; then
+            git add transition_points.csv
             git commit -m "Add model transitions [skip ci]" || echo "No changes to commit"
             git push
           else
-            echo "File dataset/transition_points.csv not found. Skipping commit."
+            echo "File transition_points.csv not found. Skipping commit."
             exit 1
           fi
