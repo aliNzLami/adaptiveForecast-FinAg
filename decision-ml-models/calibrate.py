@@ -11,9 +11,12 @@ Constraints (from the framework paper):
   C2. Boundedness: the requirement vector stays in [0, 1] for every context.
 
 Objective: among feasible candidates, minimize the sum of coefficients.
-Rationale: the most permissive feasible calibration is preferred. Large
-coefficients over-constrain the requirement vector; small coefficients
-represent a lighter touch on the primary drivers.
+Rationale: the most permissive feasible calibration is preferred.
+
+Grid range: coefficients searched in [0.50, 0.99]. The upper bound was
+extended from 0.95 to 0.99 because the sigmoid-based requirement functions
+saturate at the boundaries of the expertise range (E near 0 or 1). Higher
+coefficient values are needed to satisfy the dominance constraint there.
 """
 
 import os
@@ -21,7 +24,6 @@ import sys
 import json
 import time
 import warnings
-from itertools import product
 
 def pprint(*args, **kwargs):
     kwargs.setdefault('flush', True)
@@ -258,13 +260,29 @@ def diagnose_failure(ctxs, a1, a2, a3, a4):
 # Grid search
 # ---------------------------------------------------------------------------
 
-def grid_search(ctxs, step=0.05):
-    vals = np.arange(0.50, 0.96, step)
+def build_grid():
+    """
+    Build the coefficient grid.
+
+    Fine steps near 0.95 because feasible solutions require high coefficients
+    to satisfy the dominance constraint at the boundaries of the expertise
+    range (E = 0 and E = 1), where the sigmoid saturates.
+    """
+    coarse = np.arange(0.50, 0.91, 0.05)                    # 0.50 to 0.90
+    fine   = np.array([0.91, 0.92, 0.93, 0.94, 0.95,
+                       0.96, 0.97, 0.98, 0.99])              # 0.91 to 0.99
+    return np.concatenate([coarse, fine])
+
+
+def grid_search(ctxs):
+    vals = build_grid()
     feasible = []
     total = len(vals) ** 4
     count = 0
 
     pprint(f"\nGrid search over {total} combinations...")
+    pprint(f"Grid values: {len(vals)} distinct coefficients")
+    pprint(f"Range: [{vals[0]:.2f}, {vals[-1]:.2f}]")
     pprint(f"Dominance threshold = {DOMINANCE_THRESHOLD} "
            f"at quantile {DOMINANCE_QUANTILE}")
     pprint(f"Sampling up to 2000 contexts")
@@ -275,7 +293,7 @@ def grid_search(ctxs, step=0.05):
             for a3 in vals:
                 for a4 in vals:
                     count += 1
-                    if count % 1000 == 0:
+                    if count % 5000 == 0:
                         elapsed = time.time() - start_time
                         pprint(f"  {count}/{total} | {elapsed:.1f}s")
 
@@ -353,6 +371,7 @@ def main():
     pprint("=" * 80)
     pprint("CALIBRATION - US Crop & Weather Dataset")
     pprint(f"Objective: minimize sum of coefficients subject to feasibility")
+    pprint(f"Grid range: [0.50, 0.99]")
     pprint(f"Seed: {SEED} | Sigma: {PERTURB_SIGMA} | Per real ctx: {PERTURB_PER_REAL}")
     pprint("=" * 80)
 
@@ -372,7 +391,7 @@ def main():
     all_ctxs = list(synth_ctxs) + list(real_ctxs)
     pprint(f"Total contexts: {len(all_ctxs)}")
 
-    feasible = grid_search(all_ctxs, step=0.05)
+    feasible = grid_search(all_ctxs)
 
     if not feasible:
         pprint("\n" + "!" * 80)
@@ -385,9 +404,13 @@ def main():
                    f"q05={st['q05']:.4f} "
                    f"median={st['median']:.4f} "
                    f"max={st['max']:.4f}")
-        pprint("\nThreshold = 0.70, required at q05.")
-        pprint("If q05 is far below 0.70 for some requirement, the calibration "
-               "constraints are not satisfiable with the current equations.")
+        pprint("\nDiagnostic on a high-range candidate (a1=a2=a3=a4=0.95):")
+        diag = diagnose_failure(all_ctxs, 0.95, 0.95, 0.95, 0.95)
+        for name, st in diag.items():
+            pprint(f"  {name:8s}: min={st['min']:.4f} "
+                   f"q05={st['q05']:.4f} "
+                   f"median={st['median']:.4f} "
+                   f"max={st['max']:.4f}")
         sys.exit(1)
 
     verified = final_verification(all_ctxs, feasible, top_k=20)
@@ -416,6 +439,7 @@ def main():
         'dataset': 'US_Agriculture_Weather_2010_2024.csv',
         'target': 'Corn_Price_USD',
         'seed': SEED,
+        'grid_range': [0.50, 0.99],
         'dominance_threshold': DOMINANCE_THRESHOLD,
         'dominance_quantile': DOMINANCE_QUANTILE,
         'perturb_sigma': PERTURB_SIGMA,
