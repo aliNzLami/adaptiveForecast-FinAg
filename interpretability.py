@@ -86,7 +86,7 @@ def load_main_dataset():
 
 def load_transitions():
     base = os.path.dirname(os.path.abspath(__file__))
-    p = os.path.join(base, "transition_points.csv")
+    p = os.path.join(base, "dataset", "transition_points.csv")
     if not os.path.exists(p):
         print(f"Warning: transition_points.csv not found. Skipping near/far grouping.")
         return None
