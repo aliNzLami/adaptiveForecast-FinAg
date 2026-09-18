@@ -1,0 +1,119 @@
+{
+  "config": {
+    "forward_days": 30,
+    "forward_max_lookahead": 15,
+    "regime_threshold": 0.03,
+    "near_transition_days": 30,
+    "test_fraction": 0.2,
+    "seed": 42,
+    "features": [
+      "Max_Temp_C",
+      "Min_Temp_C",
+      "Precipitation_mm",
+      "is_spring",
+      "is_summer",
+      "is_fall"
+    ]
+  },
+  "dataset": {
+    "total_rows": 3497,
+    "train_rows": 2798,
+    "test_rows": 699,
+    "near_transition_rows": 1521,
+    "far_transition_rows": 1976,
+    "class_distribution": {
+      "Neutral": 1247,
+      "Bullish": 1211,
+      "Bearish": 1039
+    }
+  },
+  "baseline": {
+    "accuracy": 0.32761087267525035,
+    "f1_macro": 0.16451149425287356
+  },
+  "metrics": {
+    "accuracy": 0.4248927038626609,
+    "f1_macro": 0.4195184163087227,
+    "f1_weighted": 0.417344568175168,
+    "per_class": {
+      "Bearish": {
+        "precision": 0.48148148148148145,
+        "recall": 0.5752212389380531,
+        "f1": 0.5241935483870968,
+        "support": 226
+      },
+      "Bullish": {
+        "precision": 0.43312101910828027,
+        "recall": 0.2786885245901639,
+        "f1": 0.33915211970074816,
+        "support": 244
+      },
+      "Neutral": {
+        "precision": 0.3639705882352941,
+        "recall": 0.43231441048034935,
+        "f1": 0.39520958083832336,
+        "support": 229
+      }
+    }
+  },
+  "shap_global": {
+    "per_feature": {
+      "Max_Temp_C": 0.030107074138363072,
+      "Min_Temp_C": 0.03755088546498478,
+      "Precipitation_mm": 0.013068679306856673,
+      "is_spring": 0.015130962887166616,
+      "is_summer": 0.01914534011971519,
+      "is_fall": 0.015199471099278222
+    },
+    "per_class": {
+      "Bearish": {
+        "Max_Temp_C": 0.03482071324268935,
+        "Min_Temp_C": 0.04482240009378356,
+        "Precipitation_mm": 0.013001271215015204,
+        "is_spring": 0.020735503571840768,
+        "is_summer": 0.018904885125223744,
+        "is_fall": 0.021480137698903886
+      },
+      "Bullish": {
+        "Max_Temp_C": 0.025255061641031737,
+        "Min_Temp_C": 0.027463325315500067,
+        "Precipitation_mm": 0.012269469645321874,
+        "is_spring": 0.01737889391213183,
+        "is_summer": 0.012336748379853015,
+        "is_fall": 0.01417017557788421
+      },
+      "Neutral": {
+        "Max_Temp_C": 0.03024544753136814,
+        "Min_Temp_C": 0.0403669309856707,
+        "Precipitation_mm": 0.013935297060232945,
+        "is_spring": 0.007278491177527251,
+        "is_summer": 0.02619438685406881,
+        "is_fall": 0.009948100021046572
+      }
+    }
+  },
+  "shap_by_group": {
+    "near_transition": {
+      "n_samples": 1521,
+      "per_feature": {
+        "Max_Temp_C": 0.03060682725170014,
+        "Min_Temp_C": 0.036593010952619485,
+        "Precipitation_mm": 0.014052260320082601,
+        "is_spring": 0.014552815772547696,
+        "is_summer": 0.018849602931427883,
+        "is_fall": 0.018133622239216964
+      }
+    },
+    "far_from_transition": {
+      "n_samples": 1976,
+      "per_feature": {
+        "Max_Temp_C": 0.02972239575507073,
+        "Min_Temp_C": 0.038288196767265956,
+        "Precipitation_mm": 0.012311580763781456,
+        "is_spring": 0.015575984021445652,
+        "is_summer": 0.01937297992912055,
+        "is_fall": 0.01294094686656222
+      }
+    }
+  }
+}

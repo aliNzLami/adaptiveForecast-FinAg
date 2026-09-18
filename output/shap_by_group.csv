@@ -1,0 +1,13 @@
+group,n_samples,feature,mean_abs_shap
+near_transition,1521,Max_Temp_C,0.03060682725170014
+near_transition,1521,Min_Temp_C,0.036593010952619485
+near_transition,1521,Precipitation_mm,0.014052260320082601
+near_transition,1521,is_spring,0.014552815772547696
+near_transition,1521,is_summer,0.018849602931427883
+near_transition,1521,is_fall,0.018133622239216964
+far_from_transition,1976,Max_Temp_C,0.02972239575507073
+far_from_transition,1976,Min_Temp_C,0.038288196767265956
+far_from_transition,1976,Precipitation_mm,0.012311580763781456
+far_from_transition,1976,is_spring,0.015575984021445652
+far_from_transition,1976,is_summer,0.01937297992912055
+far_from_transition,1976,is_fall,0.01294094686656222
