@@ -1,459 +1,563 @@
-import pandas as pd
-import numpy as np
+#!/usr/bin/env python3
+"""
+Micro-level interpretability analysis.
+
+Goal: explain which ordinary weather factors (temperature, precipitation)
+drive market-regime classification, using Random Forest as the reference
+model (dominant in the framework and at transition points).
+
+Target: three-class market regime (Bullish / Bearish / Neutral), defined
+by the 30-day forward return with a +-3% threshold.
+
+Tools: SHAP (global + grouped by proximity to a transition) and LIME
+(local explanations for a handful of representative days).
+"""
+
 import os
+import sys
 import json
+import subprocess
 import warnings
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+
+# ---------------------------------------------------------------------------
+# Dependency handling
+# ---------------------------------------------------------------------------
+def _ensure(pkg, import_name=None):
+    import_name = import_name or pkg
+    try:
+        __import__(import_name)
+    except ImportError:
+        print(f"Installing {pkg}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
+
+_ensure("scikit-learn")
+_ensure("shap")
+_ensure("lime")
+
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score, precision_score, recall_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score, f1_score, classification_report, confusion_matrix
+)
 
-warnings.filterwarnings('ignore')
+import shap
+from lime.lime_tabular import LimeTabularExplainer
 
-def load_data():
-    base_dir = os.getcwd()
-    transitions_path = os.path.join(base_dir, "dataset", "transition_points.csv")
-    windows_path = os.path.join(base_dir, "dataset", "window_features.csv")
-    main_path = os.path.join(base_dir, "dataset", "US_Agriculture_Weather_2010_2024.csv")
 
-    if not os.path.exists(transitions_path):
-        raise FileNotFoundError(f"transition_points.csv not found at {transitions_path}")
-    if not os.path.exists(windows_path):
-        raise FileNotFoundError(f"window_features.csv not found at {windows_path}")
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+SEED = 42
+FORWARD_DAYS = 30
+REGIME_THRESHOLD = 0.03
+NEAR_TRANSITION_DAYS = 30
+TEST_FRACTION = 0.20
+FEATURE_COLS = ["Max_Temp_C", "Min_Temp_C", "Precipitation_mm"]
+CLASS_ORDER = ["Bearish", "Bullish", "Neutral"]
+N_LIME_SAMPLES = 5
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+def load_main_dataset():
+    base = os.path.dirname(os.path.abspath(__file__))
+    main_path = os.path.join(base, "dataset", "US_Agriculture_Weather_2010_2024.csv")
     if not os.path.exists(main_path):
-        raise FileNotFoundError(f"US_Agriculture_Weather_2010_2024.csv not found at {main_path}")
+        raise FileNotFoundError(f"Main dataset not found: {main_path}")
 
-    df_transitions = pd.read_csv(transitions_path)
-    df_transitions["transition_date"] = pd.to_datetime(df_transitions["transition_date"])
-    df_transitions["window_start"] = pd.to_datetime(df_transitions["window_start"])
-    df_transitions["window_end"] = pd.to_datetime(df_transitions["window_end"])
+    df = pd.read_csv(main_path)
+    df["Date"] = pd.to_datetime(df["Date"], format="mixed", errors="coerce")
+    n_bad = df["Date"].isna().sum()
+    if n_bad > 0:
+        print(f"Dropped {n_bad} rows with invalid dates")
+        df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    df = df.sort_values("Date").reset_index(drop=True)
+    return df
 
-    df_windows = pd.read_csv(windows_path)
-    df_windows["window_start"] = pd.to_datetime(df_windows["window_start"])
-    df_windows["window_end"] = pd.to_datetime(df_windows["window_end"])
-    df_windows["window_center"] = pd.to_datetime(df_windows["window_center"])
 
-    df_main = pd.read_csv(main_path)
-    df_main["Date"] = pd.to_datetime(df_main["Date"])
-    df_main = df_main.sort_values("Date").reset_index(drop=True)
-
-    return df_transitions, df_windows, df_main
-
-def compute_regime_for_window(row, price_dict):
-    end_date = row["window_end"]
-    future_end = end_date + pd.Timedelta(days=30)
-    if future_end not in price_dict:
+def load_transitions():
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, "dataset", "transition_points.csv")
+    if not os.path.exists(path):
+        print(f"Warning: transition_points.csv not found at {path}. "
+              f"near/far grouping will be skipped.")
         return None
-    current_price = row["corn_mean"]
-    future_price = price_dict[future_end]
-    if current_price <= 0:
-        return None
-    ret = (future_price - current_price) / current_price
-    if ret > 0.03:
-        return "Bullish"
-    elif ret < -0.03:
-        return "Bearish"
-    else:
+    df = pd.read_csv(path)
+    df["transition_estimate"] = pd.to_datetime(df["transition_estimate"])
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Target construction
+# ---------------------------------------------------------------------------
+def build_target(df):
+    """
+    For each row t, compute:
+      forward_price  = P[t + 30 days]
+      forward_return = (forward_price - P[t]) / P[t]
+      regime         = Bullish if R > 0.03, Bearish if R < -0.03, else Neutral
+
+    Rows without a matching forward price are dropped.
+    """
+    df = df.copy()
+    price_dict = dict(zip(df["Date"], df["Corn_Price_USD"]))
+
+    forward_prices = []
+    forward_returns = []
+    for d in df["Date"]:
+        fd = d + pd.Timedelta(days=FORWARD_DAYS)
+        if fd in price_dict:
+            forward_prices.append(price_dict[fd])
+            cur = price_dict[d]
+            if cur > 0:
+                forward_returns.append((price_dict[fd] - cur) / cur)
+            else:
+                forward_returns.append(np.nan)
+        else:
+            forward_prices.append(np.nan)
+            forward_returns.append(np.nan)
+
+    df["forward_price"] = forward_prices
+    df["forward_return"] = forward_returns
+
+    def _label(r):
+        if pd.isna(r):
+            return None
+        if r > REGIME_THRESHOLD:
+            return "Bullish"
+        if r < -REGIME_THRESHOLD:
+            return "Bearish"
         return "Neutral"
 
-def extract_unique_windows(df_transitions, df_windows, days_window=30):
-    selected_windows = []
-    for _, trans in df_transitions.iterrows():
-        trans_date = trans["transition_date"]
-        mask = (df_windows["window_center"] >= trans_date - pd.Timedelta(days=days_window)) & \
-               (df_windows["window_center"] <= trans_date + pd.Timedelta(days=days_window))
-        nearby = df_windows[mask].copy()
-        if not nearby.empty:
-            nearby["transition_date"] = trans_date
-            selected_windows.append(nearby)
+    df["regime"] = df["forward_return"].apply(_label)
+    df = df.dropna(subset=["regime"]).reset_index(drop=True)
+    return df
 
-    if not selected_windows:
-        return pd.DataFrame()
 
-    df_all = pd.concat(selected_windows, ignore_index=True)
-    df_all = df_all.drop_duplicates(subset=["window_start", "window_end"])
-    df_all = df_all.sort_values("window_start").reset_index(drop=True)
-    return df_all
+def mark_near_transitions(df, transitions):
+    """Add a boolean column is_near_transition to df."""
+    if transitions is None or len(transitions) == 0:
+        df["is_near_transition"] = False
+        return df
 
-def extract_days_from_windows(df_windows, df_main):
-    price_dict = dict(zip(df_main["Date"], df_main["Corn_Price_USD"]))
-    all_days = []
+    df = df.copy()
+    df["is_near_transition"] = False
+    window = pd.Timedelta(days=NEAR_TRANSITION_DAYS)
 
-    for idx, window_row in df_windows.iterrows():
-        start = window_row["window_start"]
-        end = window_row["window_end"]
-        mask = (df_main["Date"] >= start) & (df_main["Date"] <= end)
-        daily_chunk = df_main[mask].copy()
-        if daily_chunk.empty:
-            continue
+    for t in transitions["transition_estimate"]:
+        mask = ((df["Date"] >= t - window) & (df["Date"] <= t + window))
+        df.loc[mask, "is_near_transition"] = True
+    return df
 
-        regime = compute_regime_for_window(window_row, price_dict)
-        if regime is None:
-            continue
 
-        daily_chunk["window_start"] = start
-        daily_chunk["window_end"] = end
-        daily_chunk["regime"] = regime
-        daily_chunk["transition_date"] = window_row.get("transition_date", None)
+# ---------------------------------------------------------------------------
+# Model training and metrics
+# ---------------------------------------------------------------------------
+def chronological_split(df, test_fraction=TEST_FRACTION):
+    """80/20 chronological split. No shuffling. Preserves temporal order."""
+    n = len(df)
+    n_test = int(round(n * test_fraction))
+    n_train = n - n_test
+    return df.iloc[:n_train].reset_index(drop=True), df.iloc[n_train:].reset_index(drop=True)
 
-        all_days.append(daily_chunk)
 
-    if not all_days:
-        return pd.DataFrame()
+def train_rf(X_train, y_train):
+    clf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=8,
+        min_samples_leaf=5,
+        class_weight="balanced",
+        random_state=SEED,
+        n_jobs=-1,
+    )
+    clf.fit(X_train, y_train)
+    return clf
 
-    df_days = pd.concat(all_days, ignore_index=True)
-    df_days = df_days.drop_duplicates(subset=["Date", "window_start"]).reset_index(drop=True)
-    df_days = df_days.sort_values("Date").reset_index(drop=True)
 
-    return df_days
-
-def prepare_features(df_days):
-    feature_cols = ["Max_Temp_C", "Min_Temp_C", "Precipitation_mm"]
-    X = df_days[feature_cols].values
-    y = df_days["regime"].values
-    return X, y, feature_cols
-
-def calculate_classification_metrics(y_true, y_pred, model_name, class_labels):
-    accuracy = accuracy_score(y_true, y_pred)
-    f1_macro = f1_score(y_true, y_pred, average='macro')
-    f1_weighted = f1_score(y_true, y_pred, average='weighted')
-    precision_macro = precision_score(y_true, y_pred, average='macro')
-    recall_macro = recall_score(y_true, y_pred, average='macro')
-
-    report = classification_report(y_true, y_pred, target_names=class_labels, output_dict=True)
-    cm = confusion_matrix(y_true, y_pred)
-
+def compute_metrics(y_true, y_pred, labels):
+    rep = classification_report(
+        y_true, y_pred, labels=list(range(len(labels))),
+        target_names=labels, output_dict=True, zero_division=0
+    )
     return {
-        "model": model_name,
-        "accuracy": accuracy,
-        "f1_macro": f1_macro,
-        "f1_weighted": f1_weighted,
-        "precision_macro": precision_macro,
-        "recall_macro": recall_macro,
-        "classification_report": report,
-        "confusion_matrix": cm,
-        "class_labels": class_labels
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "f1_weighted": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+        "per_class": {
+            labels[i]: {
+                "precision": float(rep[labels[i]]["precision"]),
+                "recall": float(rep[labels[i]]["recall"]),
+                "f1": float(rep[labels[i]]["f1-score"]),
+                "support": int(rep[labels[i]]["support"]),
+            } for i in range(len(labels))
+        },
+        "confusion_matrix": confusion_matrix(
+            y_true, y_pred, labels=list(range(len(labels)))
+        ).tolist(),
+        "labels": list(labels),
     }
 
-def transition_detection_accuracy(df, model_name, pred_col):
-    true_labels = df["regime"]
-    pred_labels = df[pred_col]
-    df["regime_shift"] = true_labels != true_labels.shift(1)
 
-    transition_days = df[df["regime_shift"]]
-    if len(transition_days) == 0:
-        return None
+# ---------------------------------------------------------------------------
+# SHAP analysis
+# ---------------------------------------------------------------------------
+def compute_shap_global(clf, X, feature_names, class_names):
+    """
+    Returns a dict:
+      per_feature: {feature: mean |SHAP| across all classes and samples}
+      per_class_per_feature: {class: {feature: mean |SHAP|}}
+    """
+    explainer = shap.TreeExplainer(clf)
+    raw = explainer.shap_values(X)
 
-    correct = (transition_days["regime"] == transition_days[pred_col]).sum()
-    total = len(transition_days)
-    return correct / total if total > 0 else 0
+    # shap may return a list (old) or a 3D array (new). Normalize.
+    if isinstance(raw, list):
+        shap_per_class = raw
+    else:
+        # shape (n_samples, n_features, n_classes)
+        shap_per_class = [raw[:, :, i] for i in range(raw.shape[2])]
 
-def weather_based_accuracy(df, model_name, pred_col):
-    # Temperature groups
-    temp_bins = [-float('inf'), 0, 15, 25, float('inf')]
-    temp_labels = ['<0°C', '0-15°C', '15-25°C', '>25°C']
-    df["temp_group"] = pd.cut(df["Max_Temp_C"], bins=temp_bins, labels=temp_labels)
+    per_class = {}
+    for i, cname in enumerate(class_names):
+        per_class[cname] = {
+            feature_names[j]: float(np.mean(np.abs(shap_per_class[i][:, j])))
+            for j in range(len(feature_names))
+        }
 
-    temp_acc = {}
-    for group in df["temp_group"].unique():
-        if pd.isna(group):
-            continue
-        subset = df[df["temp_group"] == group]
-        correct = (subset["regime"] == subset[pred_col]).sum()
-        total = len(subset)
-        temp_acc[group] = correct / total if total > 0 else 0
-
-    # Precipitation groups
-    df["rain_group"] = df["Precipitation_mm"].apply(lambda x: "Rainy" if x > 0 else "Dry")
-    rain_acc = {}
-    for group in df["rain_group"].unique():
-        if pd.isna(group):
-            continue
-        subset = df[df["rain_group"] == group]
-        correct = (subset["regime"] == subset[pred_col]).sum()
-        total = len(subset)
-        rain_acc[group] = correct / total if total > 0 else 0
-
-    return {
-        "temperature": temp_acc,
-        "precipitation": rain_acc
+    overall = {
+        feature_names[j]: float(np.mean([
+            np.mean(np.abs(shap_per_class[i][:, j]))
+            for i in range(len(class_names))
+        ]))
+        for j in range(len(feature_names))
     }
 
-def regime_stability_index(df, model_name, pred_col):
-    true_labels = df["regime"]
-    pred_labels = df[pred_col]
+    return {"per_feature": overall, "per_class_per_feature": per_class}
 
-    df["regime_block"] = (true_labels != true_labels.shift(1)).cumsum()
-    block_accuracies = []
 
-    for block_id in df["regime_block"].unique():
-        block_data = df[df["regime_block"] == block_id]
-        if len(block_data) == 0:
+def compute_shap_by_group(clf, X, groups, feature_names, class_names):
+    """
+    Split samples into two groups (True / False of `groups`) and compute
+    mean |SHAP| per feature per group.
+    """
+    explainer = shap.TreeExplainer(clf)
+    raw = explainer.shap_values(X)
+
+    if isinstance(raw, list):
+        shap_per_class = raw
+    else:
+        shap_per_class = [raw[:, :, i] for i in range(raw.shape[2])]
+
+    groups = np.asarray(groups, dtype=bool)
+    result = {}
+    for flag, label in [(True, "near_transition"), (False, "far_from_transition")]:
+        idx = np.where(groups == flag)[0]
+        if len(idx) == 0:
+            result[label] = {"n_samples": 0, "per_feature": {}}
             continue
-        correct = (block_data["regime"] == block_data[pred_col]).sum()
-        total = len(block_data)
-        block_accuracies.append(correct / total if total > 0 else 0)
 
-    if not block_accuracies:
-        return 0
+        per_feature = {}
+        for j, fname in enumerate(feature_names):
+            vals = [
+                np.mean(np.abs(shap_per_class[i][idx, j]))
+                for i in range(len(class_names))
+            ]
+            per_feature[fname] = float(np.mean(vals))
 
-    return np.mean(block_accuracies)
+        result[label] = {"n_samples": int(len(idx)), "per_feature": per_feature}
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LIME
+# ---------------------------------------------------------------------------
+def pick_lime_samples(df_test, X_test, y_test_enc, clf, class_names):
+    """
+    Pick representative samples for LIME:
+      1. Most confident Bearish prediction
+      2. Most confident Bullish prediction
+      3. Most confident Neutral prediction
+      4. A near-transition row with any prediction
+      5. A far-from-transition row with any prediction
+    Returns a list of dicts with index, description, and predicted class.
+    """
+    probs = clf.predict_proba(X_test)
+    preds = clf.predict(X_test)
+    n = len(X_test)
+    picked = []
+    used = set()
+
+    def _pick(mask, desc):
+        if mask is None or not mask.any():
+            return
+        candidates = np.where(mask)[0]
+        if len(candidates) == 0:
+            return
+        conf = probs[candidates].max(axis=1)
+        order = np.argsort(-conf)
+        for idx in candidates[order]:
+            if idx not in used:
+                used.add(idx)
+                picked.append({
+                    "index": int(idx),
+                    "description": desc,
+                    "predicted_class": class_names[preds[idx]],
+                    "confidence": float(probs[idx].max()),
+                })
+                return
+
+    for cls_idx, cls_name in enumerate(class_names):
+        _pick(preds == cls_idx, f"confident_{cls_name}")
+
+    if "is_near_transition" in df_test.columns:
+        _pick(df_test["is_near_transition"].values, "near_transition")
+        _pick(~df_test["is_near_transition"].values, "far_from_transition")
+
+    return picked[:N_LIME_SAMPLES]
+
+
+def run_lime(clf, X_train, X_test, df_test, samples, feature_names, class_names, out_dir):
+    explainer = LimeTabularExplainer(
+        training_data=np.asarray(X_train, dtype=float),
+        feature_names=feature_names,
+        class_names=class_names,
+        mode="classification",
+        discretize_continuous=True,
+        random_state=SEED,
+    )
+
+    explanations = []
+    for s in samples:
+        i = s["index"]
+        row = np.asarray(X_test[i], dtype=float)
+        exp = explainer.explain_instance(
+            data_row=row,
+            predict_fn=clf.predict_proba,
+            num_features=len(feature_names),
+            top_labels=len(class_names),
+        )
+
+        per_class = {}
+        for cls_idx, cls_name in enumerate(class_names):
+            if cls_idx in exp.local_exp:
+                per_class[cls_name] = [
+                    {"condition": str(cond), "weight": float(w)}
+                    for cond, w in exp.local_exp[cls_idx]
+                ]
+
+        explanations.append({
+            "sample_index": int(i),
+            "description": s["description"],
+            "predicted_class": s["predicted_class"],
+            "confidence": s["confidence"],
+            "date": str(df_test.iloc[i]["Date"].date()),
+            "true_regime": df_test.iloc[i]["regime"],
+            "feature_values": {
+                f: float(X_test[i][j]) for j, f in enumerate(feature_names)
+            },
+            "local_explanations": per_class,
+        })
+
+    path = os.path.join(out_dir, "lime_explanations.json")
+    with open(path, "w") as f:
+        json.dump(explanations, f, indent=2, default=str)
+    return explanations
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
-    print("=" * 70)
-    print("TRANSITION WINDOWS ANALYSIS - DAILY DATA APPROACH")
-    print("=" * 70)
+    print("=" * 72)
+    print("MICRO-LEVEL INTERPRETABILITY - RF CLASSIFIER")
+    print("=" * 72)
 
-    print("\n[1] Loading data...")
-    df_transitions, df_windows, df_main = load_data()
-    print(f"    Transitions: {len(df_transitions)}")
-    print(f"    Windows: {len(df_windows)}")
-    print(f"    Daily records: {len(df_main)}")
+    print("\n[1] Loading main dataset...")
+    df = load_main_dataset()
+    print(f"    Raw daily records: {len(df)}")
 
-    print("\n[2] Extracting unique windows around transition points...")
-    df_unique_windows = extract_unique_windows(df_transitions, df_windows, days_window=30)
-    print(f"    Unique windows found: {len(df_unique_windows)}")
+    print("\n[2] Building regime target (30-day forward return, +-3%)...")
+    df = build_target(df)
+    print(f"    Rows with a valid regime: {len(df)}")
 
-    if df_unique_windows.empty:
-        print("    No windows found. Exiting.")
-        return
+    print("\n[3] Loading transition points and marking near/far days...")
+    transitions = load_transitions()
+    df = mark_near_transitions(df, transitions)
+    n_near = int(df["is_near_transition"].sum())
+    n_far = int((~df["is_near_transition"]).sum())
+    print(f"    Near transition (<{NEAR_TRANSITION_DAYS}d): {n_near}")
+    print(f"    Far from transition: {n_far}")
 
-    print("\n[3] Extracting all days from these windows...")
-    df_days = extract_days_from_windows(df_unique_windows, df_main)
-    print(f"    Total days extracted: {len(df_days)}")
+    print("\n[4] Regime distribution:")
+    for cls, cnt in df["regime"].value_counts().items():
+        print(f"    {cls}: {cnt} ({cnt/len(df)*100:.1f}%)")
 
-    if df_days.empty:
-        print("    No days extracted. Exiting.")
-        return
+    print("\n[5] Chronological split (80/20)...")
+    df_train, df_test = chronological_split(df, TEST_FRACTION)
+    print(f"    Train: {len(df_train)} rows "
+          f"({df_train['Date'].min().date()} to {df_train['Date'].max().date()})")
+    print(f"    Test:  {len(df_test)} rows "
+          f"({df_test['Date'].min().date()} to {df_test['Date'].max().date()})")
 
-    print("\n[4] Class distribution:")
-    class_dist = df_days["regime"].value_counts()
-    for cls, count in class_dist.items():
-        print(f"    {cls}: {count} ({count/len(df_days)*100:.1f}%)")
+    le = LabelEncoder().fit(CLASS_ORDER)
+    X_train = df_train[FEATURE_COLS].values
+    y_train = le.transform(df_train["regime"].values)
+    X_test = df_test[FEATURE_COLS].values
+    y_test = le.transform(df_test["regime"].values)
 
-    X, y, feature_cols = prepare_features(df_days)
+    print("\n[6] Training Random Forest classifier...")
+    clf = train_rf(X_train, y_train)
+    y_pred = clf.predict(X_test)
 
-    le = LabelEncoder()
-    y_enc = le.fit_transform(y)
+    print("\n[7] Test-set metrics:")
+    metrics = compute_metrics(y_test, y_pred, CLASS_ORDER)
+    print(f"    Accuracy:     {metrics['accuracy']:.4f}")
+    print(f"    F1-macro:     {metrics['f1_macro']:.4f}")
+    print(f"    F1-weighted:  {metrics['f1_weighted']:.4f}")
+    print("    Per-class F1:")
+    for cls in CLASS_ORDER:
+        m = metrics["per_class"][cls]
+        print(f"      {cls:8s}: P={m['precision']:.3f} R={m['recall']:.3f} "
+              f"F1={m['f1']:.3f} (n={m['support']})")
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    print("\n[8] Global SHAP analysis (full dataset)...")
+    X_all = df[FEATURE_COLS].values
+    shap_global = compute_shap_global(clf, X_all, FEATURE_COLS, CLASS_ORDER)
+    print("    Mean |SHAP| per feature (across all classes):")
+    for f, v in sorted(shap_global["per_feature"].items(),
+                        key=lambda x: -x[1]):
+        print(f"      {f:20s}: {v:.4f}")
 
-    print("\n[5] Training Random Forest classifier...")
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-    rf_model.fit(X_scaled, y_enc)
-    y_pred_rf = rf_model.predict(X_scaled)
-    acc_rf = accuracy_score(y_enc, y_pred_rf)
-    print(f"    Accuracy: {acc_rf:.4f}")
-
-    print("\n[6] Training KNN classifier...")
-    k = min(5, max(1, len(X_scaled) - 1))
-    knn_model = KNeighborsClassifier(n_neighbors=k, n_jobs=-1)
-    knn_model.fit(X_scaled, y_enc)
-    y_pred_knn = knn_model.predict(X_scaled)
-    acc_knn = accuracy_score(y_enc, y_pred_knn)
-    print(f"    Accuracy: {acc_knn:.4f}")
-
-    print("\n[7] Calculating classification metrics...")
-    results = {}
-
-    # RF metrics
-    rf_metrics = calculate_classification_metrics(
-        y_enc, y_pred_rf, "rf", le.classes_
+    print("\n[9] SHAP grouped by proximity to a transition...")
+    shap_grouped = compute_shap_by_group(
+        clf, X_all, df["is_near_transition"].values, FEATURE_COLS, CLASS_ORDER
     )
-    results["rf"] = rf_metrics
+    for grp in ["near_transition", "far_from_transition"]:
+        g = shap_grouped[grp]
+        print(f"    {grp} (n={g['n_samples']}):")
+        for f, v in sorted(g["per_feature"].items(), key=lambda x: -x[1]):
+            print(f"      {f:20s}: {v:.4f}")
 
-    # KNN metrics
-    knn_metrics = calculate_classification_metrics(
-        y_enc, y_pred_knn, "knn", le.classes_
+    print("\n[10] LIME local explanations...")
+    samples = pick_lime_samples(df_test, X_test, y_test, clf, CLASS_ORDER)
+    for s in samples:
+        print(f"    - {s['description']}: date={df_test.iloc[s['index']]['Date'].date()}, "
+              f"pred={s['predicted_class']}, conf={s['confidence']:.2f}")
+
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(out_dir, exist_ok=True)
+
+    lime_results = run_lime(clf, X_train, X_test, df_test, samples,
+                             FEATURE_COLS, CLASS_ORDER, out_dir)
+
+    # ------------------------------------------------------------------
+    # Save outputs
+    # ------------------------------------------------------------------
+    print("\n[11] Saving outputs...")
+
+    # Classification metrics
+    metrics_rows = []
+    for cls in CLASS_ORDER:
+        m = metrics["per_class"][cls]
+        metrics_rows.append({
+            "class": cls, "precision": m["precision"],
+            "recall": m["recall"], "f1": m["f1"], "support": m["support"],
+        })
+    metrics_rows.append({
+        "class": "MACRO", "precision": None, "recall": None,
+        "f1": metrics["f1_macro"], "support": len(y_test),
+    })
+    metrics_rows.append({
+        "class": "WEIGHTED", "precision": None, "recall": None,
+        "f1": metrics["f1_weighted"], "support": len(y_test),
+    })
+    pd.DataFrame(metrics_rows).to_csv(
+        os.path.join(out_dir, "classification_metrics.csv"), index=False
     )
-    results["knn"] = knn_metrics
 
-    # Print RF report
-    print(f"\n    Random Forest Classification Report:")
-    print(f"      Accuracy: {rf_metrics['accuracy']:.4f}")
-    print(f"      F1-Macro: {rf_metrics['f1_macro']:.4f}")
-    print(f"      F1-Weighted: {rf_metrics['f1_weighted']:.4f}")
-    print(f"      Precision-Macro: {rf_metrics['precision_macro']:.4f}")
-    print(f"      Recall-Macro: {rf_metrics['recall_macro']:.4f}")
+    # Confusion matrix
+    cm = pd.DataFrame(metrics["confusion_matrix"],
+                      index=CLASS_ORDER, columns=CLASS_ORDER)
+    cm.to_csv(os.path.join(out_dir, "confusion_matrix.csv"))
 
-    print(f"\n    KNN Classification Report:")
-    print(f"      Accuracy: {knn_metrics['accuracy']:.4f}")
-    print(f"      F1-Macro: {knn_metrics['f1_macro']:.4f}")
-    print(f"      F1-Weighted: {knn_metrics['f1_weighted']:.4f}")
-    print(f"      Precision-Macro: {knn_metrics['precision_macro']:.4f}")
-    print(f"      Recall-Macro: {knn_metrics['recall_macro']:.4f}")
+    # SHAP global per class
+    rows = []
+    for cls, feat_vals in shap_global["per_class_per_feature"].items():
+        for f, v in feat_vals.items():
+            rows.append({"class": cls, "feature": f, "mean_abs_shap": v})
+    pd.DataFrame(rows).to_csv(
+        os.path.join(out_dir, "shap_per_class.csv"), index=False
+    )
 
-    # Feature importance from Random Forest
-    print("\n[8] Feature importance analysis...")
-    importances = rf_model.feature_importances_
-    feature_importance_df = pd.DataFrame({
-        "feature": feature_cols,
-        "importance": importances
-    }).sort_values("importance", ascending=False)
+    # SHAP overall
+    pd.DataFrame([
+        {"feature": f, "mean_abs_shap": v}
+        for f, v in shap_global["per_feature"].items()
+    ]).to_csv(os.path.join(out_dir, "shap_global.csv"), index=False)
 
-    print("\n    Random Forest Feature Importance:")
-    for idx, row in feature_importance_df.iterrows():
-        print(f"      {row['feature']}: {row['importance']:.4f}")
+    # SHAP by group
+    rows = []
+    for grp, data in shap_grouped.items():
+        for f, v in data["per_feature"].items():
+            rows.append({
+                "group": grp, "n_samples": data["n_samples"],
+                "feature": f, "mean_abs_shap": v,
+            })
+    pd.DataFrame(rows).to_csv(
+        os.path.join(out_dir, "shap_by_group.csv"), index=False
+    )
 
-    # Add predictions to dataframe for further analysis
-    df_days["predicted_regime_rf"] = le.inverse_transform(y_pred_rf)
-    df_days["predicted_regime_knn"] = le.inverse_transform(y_pred_knn)
-    df_days["rf_correct"] = df_days["regime"] == df_days["predicted_regime_rf"]
-    df_days["knn_correct"] = df_days["regime"] == df_days["predicted_regime_knn"]
+    # Full test predictions
+    df_test_out = df_test.copy()
+    df_test_out["predicted_regime"] = le.inverse_transform(y_pred)
+    df_test_out["correct"] = (df_test_out["regime"] == df_test_out["predicted_regime"])
+    df_test_out.to_csv(
+        os.path.join(out_dir, "test_predictions.csv"), index=False
+    )
 
-    # Transition detection accuracy
-    print("\n[9] Transition detection accuracy...")
-    for model, pred_col in [("rf", "predicted_regime_rf"), ("knn", "predicted_regime_knn")]:
-        acc = transition_detection_accuracy(df_days, model, pred_col)
-        if acc is not None:
-            print(f"    {model.upper()} on transition days: {acc:.4f}")
-            results[model]["transition_accuracy"] = acc
-
-    # Weather-based accuracy (temperature + precipitation)
-    print("\n[10] Weather-based accuracy analysis...")
-    for model, pred_col in [("rf", "predicted_regime_rf"), ("knn", "predicted_regime_knn")]:
-        weather_acc = weather_based_accuracy(df_days, model, pred_col)
-        if weather_acc:
-            print(f"\n    {model.upper()} accuracy by temperature group:")
-            for group, acc in weather_acc["temperature"].items():
-                print(f"      {group}: {acc:.4f}")
-            print(f"\n    {model.upper()} accuracy by precipitation group:")
-            for group, acc in weather_acc["precipitation"].items():
-                print(f"      {group}: {acc:.4f}")
-            results[model]["weather_accuracy"] = weather_acc
-
-    # Regime stability index
-    print("\n[11] Regime stability index...")
-    for model, pred_col in [("rf", "predicted_regime_rf"), ("knn", "predicted_regime_knn")]:
-        stability = regime_stability_index(df_days, model, pred_col)
-        if stability is not None:
-            print(f"    {model.upper()} stability index: {stability:.4f}")
-            results[model]["stability_index"] = stability
-
-    print("\n[12] Saving outputs...")
-
-    output_dir = os.path.join(os.getcwd(), "output")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. Daily predictions with all analysis columns
-    temp_bins = [-float('inf'), 0, 15, 25, float('inf')]
-    temp_labels = ['<0°C', '0-15°C', '15-25°C', '>25°C']
-    df_days["temp_group"] = pd.cut(df_days["Max_Temp_C"], bins=temp_bins, labels=temp_labels)
-    df_days["rain_group"] = df_days["Precipitation_mm"].apply(lambda x: "Rainy" if x > 0 else "Dry")
-    df_days["regime_shift"] = df_days["regime"] != df_days["regime"].shift(1)
-
-    full_output = os.path.join(output_dir, "daily_data_with_predictions.csv")
-    df_days.to_csv(full_output, index=False)
-    print(f"    Full dataset with predictions: {full_output}")
-
-    # 2. Feature importance
-    feature_output = os.path.join(output_dir, "feature_importance.csv")
-    feature_importance_df.to_csv(feature_output, index=False)
-    print(f"    Feature importance: {feature_output}")
-
-    # 3. Classification metrics summary
-    summary_rows = []
-    for model, metrics in results.items():
-        summary_rows.append({
-            "model": model.upper(),
+    # Summary JSON
+    summary = {
+        "config": {
+            "forward_days": FORWARD_DAYS,
+            "regime_threshold": REGIME_THRESHOLD,
+            "near_transition_days": NEAR_TRANSITION_DAYS,
+            "test_fraction": TEST_FRACTION,
+            "seed": SEED,
+        },
+        "dataset": {
+            "total_rows": int(len(df)),
+            "train_rows": int(len(df_train)),
+            "test_rows": int(len(df_test)),
+            "near_transition_rows": n_near,
+            "far_transition_rows": n_far,
+            "class_distribution": {
+                k: int(v) for k, v in df["regime"].value_counts().items()
+            },
+        },
+        "metrics": {
             "accuracy": metrics["accuracy"],
             "f1_macro": metrics["f1_macro"],
             "f1_weighted": metrics["f1_weighted"],
-            "precision_macro": metrics["precision_macro"],
-            "recall_macro": metrics["recall_macro"],
-            "transition_accuracy": metrics.get("transition_accuracy", None),
-            "stability_index": metrics.get("stability_index", None)
-        })
-    summary_df = pd.DataFrame(summary_rows)
-    summary_output = os.path.join(output_dir, "classification_summary.csv")
-    summary_df.to_csv(summary_output, index=False)
-    print(f"    Classification summary: {summary_output}")
-
-    # 4. Per-class detailed reports
-    class_reports = []
-    for model, metrics in results.items():
-        report = metrics["classification_report"]
-        for class_name, class_metrics in report.items():
-            if class_name in ["accuracy", "macro avg", "weighted avg"]:
-                continue
-            class_reports.append({
-                "model": model.upper(),
-                "class": class_name,
-                "precision": class_metrics["precision"],
-                "recall": class_metrics["recall"],
-                "f1-score": class_metrics["f1-score"],
-                "support": class_metrics["support"]
-            })
-    class_report_df = pd.DataFrame(class_reports)
-    class_report_output = os.path.join(output_dir, "per_class_metrics.csv")
-    class_report_df.to_csv(class_report_output, index=False)
-    print(f"    Per-class metrics: {class_report_output}")
-
-    # 5. Confusion matrices
-    for model, metrics in results.items():
-        cm = metrics["confusion_matrix"]
-        labels_cm = metrics["class_labels"]
-        cm_df = pd.DataFrame(cm, index=labels_cm, columns=labels_cm)
-        cm_output = os.path.join(output_dir, f"confusion_matrix_{model}.csv")
-        cm_df.to_csv(cm_output)
-        print(f"    Confusion matrix ({model.upper()}): {cm_output}")
-
-    # 6. Weather-based accuracy (both temperature and precipitation)
-    weather_rows = []
-    for model, metrics in results.items():
-        if "weather_accuracy" in metrics:
-            # Temperature groups
-            for temp_group, acc in metrics["weather_accuracy"]["temperature"].items():
-                weather_rows.append({
-                    "model": model.upper(),
-                    "weather_type": "temperature",
-                    "group": temp_group,
-                    "accuracy": acc
-                })
-            # Precipitation groups
-            for rain_group, acc in metrics["weather_accuracy"]["precipitation"].items():
-                weather_rows.append({
-                    "model": model.upper(),
-                    "weather_type": "precipitation",
-                    "group": rain_group,
-                    "accuracy": acc
-                })
-    if weather_rows:
-        weather_df = pd.DataFrame(weather_rows)
-        weather_output = os.path.join(output_dir, "weather_based_accuracy.csv")
-        weather_df.to_csv(weather_output, index=False)
-        print(f"    Weather-based accuracy: {weather_output}")
-
-    # 7. Final JSON report
-    report = {
-        "total_transitions": len(df_transitions),
-        "unique_windows_analyzed": len(df_unique_windows),
-        "total_days_analyzed": len(df_days),
-        "class_distribution": class_dist.to_dict(),
-        "feature_importance": feature_importance_df.to_dict(orient="records"),
-        "models": results
+            "per_class": metrics["per_class"],
+        },
+        "shap_global": shap_global,
+        "shap_by_group": shap_grouped,
+        "lime_samples": [s["description"] for s in samples],
     }
-    report_path = os.path.join(output_dir, "final_analysis_report.json")
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=2, default=str)
-    print(f"    Analysis report: {report_path}")
+    with open(os.path.join(out_dir, "micro_analysis_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2, default=str)
 
-    print("\n" + "=" * 70)
-    print("SUMMARY")
-    print("=" * 70)
-    for model, metrics in results.items():
-        print(f"\n{model.upper()} Model:")
-        print(f"  Accuracy: {metrics['accuracy']:.4f}")
-        print(f"  F1-Macro: {metrics['f1_macro']:.4f}")
-        print(f"  Transition Accuracy: {metrics.get('transition_accuracy', 0):.4f}")
-        print(f"  Stability Index: {metrics.get('stability_index', 0):.4f}")
-
-    print("\nFeature Importance (Random Forest):")
-    for idx, row in feature_importance_df.iterrows():
-        print(f"  {row['feature']}: {row['importance']:.4f}")
-
+    print(f"    Outputs written to: {out_dir}")
     print("\nDone.")
+
 
 if __name__ == "__main__":
     main()
