@@ -1,7 +1,0 @@
-group,n_samples,feature,mean_abs_shap
-near_transition,876,Max_Temp_C,0.03458208992593637
-near_transition,876,Min_Temp_C,0.043292684151458816
-near_transition,876,Precipitation_mm,0.017629991998438697
-far_from_transition,1164,Max_Temp_C,0.03443473788077501
-far_from_transition,1164,Min_Temp_C,0.04682799979965822
-far_from_transition,1164,Precipitation_mm,0.015116783305360421
