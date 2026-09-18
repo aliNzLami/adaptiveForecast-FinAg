@@ -1,0 +1,10 @@
+class,feature,mean_abs_shap
+Bearish,Max_Temp_C,0.03698513158643842
+Bearish,Min_Temp_C,0.05636633624798022
+Bearish,Precipitation_mm,0.01739666480334907
+Bullish,Max_Temp_C,0.02937921388072206
+Bullish,Min_Temp_C,0.028413088863904087
+Bullish,Precipitation_mm,0.016679314181236905
+Neutral,Max_Temp_C,0.03712969228040184
+Neutral,Min_Temp_C,0.05115025589323346
+Neutral,Precipitation_mm,0.014511975071402013
